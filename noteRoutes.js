@@ -1,147 +1,143 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const router = express.Router();
+
 const Note = require('../models/Note');
 const { sendNoteCreatedEmail } = require('../services/emailService');
 
-// In-memory storage fallback
+// In-memory fallback
 let notesInMemory = [];
 let noteId = 1;
 
+/* =========================
+   CREATE NOTE
+========================= */
 router.post('/', async (req, res) => {
+  const { text, userId, userEmail } = req.body;
+
+  if (!text || !userId) {
+    return res.status(400).json({ error: 'text and userId are required' });
+  }
+
   try {
-    if (!req.body.text) {
-      return res.status(400).json({ error: 'Note text is required' });
-    }
+    // DB MODE
+    if (mongoose.connection.readyState === 1) {
+      const note = await Note.create({ text, userId, userEmail });
 
-    const note = new Note({
-      text: req.body.text,
-      userId: req.body.userId,
-      userEmail: req.body.userEmail
-    });
-    const savedNote = await note.save();
-
-    // Send email notification
-    let previewUrl = null;
-    if (req.body.userEmail) {
-      const emailResult = await sendNoteCreatedEmail(
-        req.body.userEmail,
-        req.body.text,
-        savedNote._id
-      );
-
-      savedNote.emailSent = !!emailResult.success;
-      if (emailResult.success) {
-        savedNote.emailSentAt = new Date();
-        await savedNote.save();
+      let previewUrl = null;
+      if (userEmail) {
+        try {
+          const emailResult = await sendNoteCreatedEmail(
+            userEmail,
+            text,
+            note._id
+          );
+          if (emailResult?.success) {
+            note.emailSent = true;
+            note.emailSentAt = new Date();
+            await note.save();
+            previewUrl = emailResult.previewUrl || null;
+          }
+        } catch (e) {
+          console.error('Email failed:', e.message);
+        }
       }
-      previewUrl = emailResult.previewUrl || null;
-      if (previewUrl) console.log('Email preview URL for note', savedNote._id, previewUrl);
+
+      return res.status(201).json({
+        ...note.toObject(),
+        previewUrl,
+        message: 'Note created successfully'
+      });
     }
 
-    res.status(201).json({
-      ...savedNote.toObject(),
-      message: 'Note created successfully',
-      previewUrl
-    });
-  } catch (err) {
-    console.error('Error saving to DB:', err.message);
-    // Fallback to in-memory storage
+    // FALLBACK MODE
     const inMemNote = {
       _id: noteId++,
-      text: req.body.text,
-      userId: req.body.userId,
-      userEmail: req.body.userEmail,
+      text,
+      userId,
+      userEmail,
       createdAt: new Date(),
-      emailSent: false,
-      message: 'Note created successfully (demo mode)'
+      emailSent: false
     };
     notesInMemory.push(inMemNote);
 
-    // Attempt to send email even when using in-memory fallback
-    let previewUrl = null;
-    try {
-      if (req.body.userEmail) {
-        const emailResult = await sendNoteCreatedEmail(
-          req.body.userEmail,
-          req.body.text,
-          inMemNote._id
-        );
-        inMemNote.emailSent = !!emailResult.success;
-        if (emailResult.success) {
-          inMemNote.emailSentAt = new Date();
-        }
-        previewUrl = emailResult.previewUrl || null;
-        if (previewUrl) console.log('Email preview URL for in-memory note', inMemNote._id, previewUrl);
-      }
-    } catch (emailErr) {
-      console.error('Error sending email for in-memory note:', emailErr && emailErr.message ? emailErr.message : emailErr);
-    }
-
     res.status(201).json({
       ...inMemNote,
-      previewUrl
+      message: 'Note created successfully (demo mode)'
     });
-  }
-});
 
-router.get('/', async (req, res) => {
-  try {
-    const userId = req.user?.uid || req.query.userId;
-    const userEmail = req.user?.email || req.query.userEmail;
-
-    if (!userId || !userEmail) {
-      return res.status(400).json({ error: 'User ID and email required' });
-    }
-
-    let userNotes = [];
-    if (mongoose.connection.readyState === 1) {
-      userNotes = await Note.find({ userId }).sort({ createdAt: -1 });
-    } else {
-      userNotes = notesInMemory.filter(note => note.userId === userId);
-    }
-
-    console.log('Notes for user:', userId, userNotes);
-    res.json(userNotes);
   } catch (err) {
-    console.error('Error fetching notes:', err.message);
-    // Return in-memory notes for user
-    const userId = req.user?.uid || req.query.userId;
-    const userNotes = userId ? notesInMemory.filter(note => note.userId === userId) : [];
-    console.log('Returning in-memory notes for user:', userId, userNotes);
-    res.json(userNotes.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+    console.error('Create note error:', err.message);
+    res.status(500).json({ error: 'Failed to create note' });
   }
 });
 
-router.delete('/:id', async (req, res) => {
-  try {
-    const userId = req.user?.uid || req.body.userId;
+/* =========================
+   GET NOTES
+========================= */
+router.get('/', async (req, res) => {
+  const userId = req.query.userId || req.user?.uid;
 
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID required' });
+  if (!userId) {
+    return res.status(400).json({ error: 'userId required' });
+  }
+
+  try {
+    if (mongoose.connection.readyState === 1) {
+      const notes = await Note.find({ userId }).sort({ createdAt: -1 });
+      return res.json(notes);
     }
 
-    let deletedNote;
+    const notes = notesInMemory
+      .filter(n => n.userId === userId)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json(notes);
+
+  } catch (err) {
+    console.error('Fetch notes error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+/* =========================
+   DELETE NOTE
+========================= */
+router.delete('/:id', async (req, res) => {
+  const userId = req.body.userId || req.user?.uid;
+  const noteIdParam = req.params.id;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'userId required' });
+  }
+
+  try {
     if (mongoose.connection.readyState === 1) {
-      deletedNote = await Note.findOneAndDelete({
-        _id: req.params.id,
+      const deleted = await Note.findOneAndDelete({
+        _id: noteIdParam,
         userId
       });
-    } else {
-      // Use in-memory storage
-      const noteIndex = notesInMemory.findIndex(note => note._id === parseInt(req.params.id) && note.userId === userId);
-      if (noteIndex !== -1) {
-        deletedNote = notesInMemory.splice(noteIndex, 1)[0];
+
+      if (!deleted) {
+        return res.status(404).json({ error: 'Note not found' });
       }
+
+      return res.json({ message: 'Note deleted successfully' });
     }
 
-    if (!deletedNote) {
+    const index = notesInMemory.findIndex(
+      n => String(n._id) === String(noteIdParam) && n.userId === userId
+    );
+
+    if (index === -1) {
       return res.status(404).json({ error: 'Note not found' });
     }
 
-    res.json({ message: 'Note deleted successfully' });
+    notesInMemory.splice(index, 1);
+    res.json({ message: 'Note deleted successfully (demo mode)' });
+
   } catch (err) {
-    console.error('Error deleting note:', err.message);
+    console.error('Delete error:', err.message);
     res.status(500).json({ error: 'Failed to delete note' });
   }
 });
