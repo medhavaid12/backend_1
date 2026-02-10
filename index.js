@@ -3,8 +3,8 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
-const noteRoutes = require('./routes/noteRoutes');
-const { verifyFirebaseToken } = require('./middleware/authMiddleware');
+const noteRoutes = require('./routes/noteRoutes.js');
+const { verifyFirebaseToken } = require('./middleware/authMiddleware.js');
 
 const app = express();
 
